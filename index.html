@@ -1,4 +1,5 @@
-<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<!doctype html>
+<html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <title>Minecraft 2</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600&display=swap">
 <style>
@@ -821,7 +822,7 @@ function setBlock(x,y,z,b){
   if(old===b)return [];
   c.data[idx]=b;if(y>c.maxY&&b!==AIR)c.maxY=y;
   recordEdit(cx,cz,idx,b);
-  const wide=!!(LIGHT[old]||LIGHT[b]);
+  const wide=!!(LIGHT[old]||LIGHT[b]||OPAQUE[old]!==OPAQUE[b]||ATT[old]!==ATT[b]);
   if(LIGHT[old])c.emit=c.emit.filter(i=>i!==idx);
   if(LIGHT[b])c.emit.push(idx);
   c.dirty=true;const out=[c];
@@ -839,7 +840,7 @@ function neighborsReady(c){for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++)if(
 const NRM=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 const UAX=[[0,1,0],[0,0,1],[0,0,1],[1,0,0],[1,0,0],[0,1,0]];
 const VAX=[[0,0,1],[0,1,0],[1,0,0],[0,0,1],[0,1,0],[1,0,0]];
-const FSH=[0.72,0.72,1,0.5,0.86,0.86];
+const FSH=[0.8,0.8,1,0.55,0.9,0.9];
 const AOF=[0.55,0.72,0.86,1];
 const AA=[0,1,1,0],BB=[0,0,1,1];
 function uvOf(f,a,b){switch(f){case 0:return [1-b,a];case 1:return [a,b];case 2:return [b,a];case 3:return [a,b];case 4:return [a,b];default:return [1-b,a];}}
@@ -875,17 +876,80 @@ function computeLight(c){
   }
   return lightBuf;
 }
+/* Luz do céu: colunas abertas = 15, propaga -1 por bloco; folhas e água atenuam */
+const SR=15,SW=CS+2*SR,SWW=SW*SW,SVOL=SWW*CH;
+const blkBuf=new Uint8Array(SVOL),skyBuf=new Uint8Array(SVOL);
+const skyQ=[];
+const ATT=new Uint8Array(256);ATT[LEAVES]=1;ATT[WATER]=2;
+let skyTop=0;
+function prepRegion(c){
+  blkBuf.fill(0);
+  let top=0;
+  for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++){
+    const nc=chunks.get(ckey(c.cx+dx,c.cz+dz));if(!nc)continue;
+    if(nc.maxY>top)top=nc.maxY;
+    const rx=dx*CS+SR,rz=dz*CS+SR;
+    const x0=Math.max(0,-rx),x1=Math.min(CS,SW-rx),z0=Math.max(0,-rz),z1=Math.min(CS,SW-rz);
+    if(x1<=x0||z1<=z0)continue;
+    for(let y=0;y<=nc.maxY;y++)for(let z=z0;z<z1;z++){
+      const o=z*CS+y*SLICE+x0;
+      blkBuf.set(nc.data.subarray(o,o+(x1-x0)),(rx+x0)+(rz+z)*SW+y*SWW);
+    }
+  }
+  skyTop=Math.min(CH-1,top+1);
+}
+function computeSky(c){
+  prepRegion(c);
+  skyBuf.fill(0);skyQ.length=0;
+  const top=skyTop;
+  for(let lz=0;lz<SW;lz++)for(let lx=0;lx<SW;lx++){
+    let v=15;const col=lx+lz*SW;
+    for(let y=top;y>=0;y--){
+      const k=col+y*SWW,b=blkBuf[k];
+      if(OPAQUE[b]){v=0;continue;}
+      v-=ATT[b];if(v<0)v=0;
+      skyBuf[k]=v;
+    }
+  }
+  for(let y=0;y<=top;y++)for(let lz=0;lz<SW;lz++)for(let lx=0;lx<SW;lx++){
+    const k=lx+lz*SW+y*SWW,v=skyBuf[k];if(v<=1)continue;
+    let need=false;
+    for(let f=0;f<6&&!need;f++){
+      const nx=lx+NRM[f][0],ny=y+NRM[f][1],nz=lz+NRM[f][2];
+      if(nx<0||nx>=SW||nz<0||nz>=SW||ny<0||ny>top)continue;
+      const nk=nx+nz*SW+ny*SWW;
+      if(!OPAQUE[blkBuf[nk]]&&skyBuf[nk]<v-1)need=true;
+    }
+    if(need)skyQ.push(k);
+  }
+  let head=0;
+  while(head<skyQ.length){
+    const k=skyQ[head++],v=skyBuf[k];if(v<=1)continue;
+    const y=(k/SWW)|0,r=k-y*SWW,lz=(r/SW)|0,lx=r-lz*SW;
+    for(let f=0;f<6;f++){
+      const nx=lx+NRM[f][0],ny=y+NRM[f][1],nz=lz+NRM[f][2];
+      if(nx<0||nx>=SW||nz<0||nz>=SW||ny<0||ny>top)continue;
+      const nk=nx+nz*SW+ny*SWW,nb=blkBuf[nk];
+      if(OPAQUE[nb])continue;
+      const a=ATT[nb],cost=(f===3&&v===15)?a:Math.max(1,a),nv=v-cost;
+      if(nv>skyBuf[nk]){skyBuf[nk]=nv;skyQ.push(nk);}
+    }
+  }
+}
+const SKYF=new Float32Array(16);for(let i=0;i<16;i++)SKYF[i]=Math.pow(0.8,15-i);
+const skyCurve=v=>{const i=Math.floor(v),f=v-i;return i>=15?1:SKYF[i]*(1-f)+SKYF[i+1]*f;};
 function tileUV(tile){return {u0:(tile%8)/8,vb:1-((tile>>3)+1)/8};}
-function addQuad(out,p,uv,sh,lg){
+function addQuad(out,p,uv,sh,lg,sk){
+  if(sk===undefined)sk=1;
   const base=out.P.length/3;
-  for(let k=0;k<4;k++){out.P.push(p[k][0],p[k][1],p[k][2]);out.U.push(uv[k][0],uv[k][1]);out.C.push(sh,lg,1);}
+  for(let k=0;k<4;k++){out.P.push(p[k][0],p[k][1],p[k][2]);out.U.push(uv[k][0],uv[k][1]);out.C.push(sh,lg,sk);}
   out.I.push(base,base+1,base+2,base,base+2,base+3,base,base+2,base+1,base,base+3,base+2);
 }
-function addCross(out,x,y,z,b,lg){
+function addCross(out,x,y,z,b,lg,sk){
   const t=tileUV(TOP[b]),e=0.0004,u0=t.u0+e,u1=t.u0+1/8-e,v0=t.vb+e,v1=t.vb+1/8-e;
   const a=0.12,f=1-a,hh=0.95,uv=[[u0,v0],[u1,v0],[u1,v1],[u0,v1]];
-  addQuad(out,[[x+a,y,z+a],[x+f,y,z+f],[x+f,y+hh,z+f],[x+a,y+hh,z+a]],uv,0.95,lg);
-  addQuad(out,[[x+a,y,z+f],[x+f,y,z+a],[x+f,y+hh,z+a],[x+a,y+hh,z+f]],uv,0.95,lg);
+  addQuad(out,[[x+a,y,z+a],[x+f,y,z+f],[x+f,y+hh,z+f],[x+a,y+hh,z+a]],uv,0.95,lg,sk);
+  addQuad(out,[[x+a,y,z+f],[x+f,y,z+a],[x+f,y+hh,z+a],[x+a,y+hh,z+f]],uv,0.95,lg,sk);
 }
 function addTorch(out,x,y,z){
   const t=tileUV(T.TORCH),px=1/128,U=p=>t.u0+p*px,V=py=>t.vb+(16-py)*px;
@@ -900,43 +964,20 @@ function addTorch(out,x,y,z){
 function buildMesh(c){
   const data=c.data,ox=c.cx*CS,oz=c.cz*CS;
   const M={P:[],U:[],C:[],I:[]},F={P:[],U:[],C:[],I:[]},W={P:[],U:[],C:[],I:[]};
-  const get=(x,y,z)=>{if(y<0)return STONE;if(y>=CH)return AIR;if(x>=0&&x<CS&&z>=0&&z<CS)return data[x+z*CS+y*SLICE];return getBlock(ox+x,y,oz+z);};
-  const topShadowCache=new Map();
-  const topShadowAt=(x,y,z)=>{
-    const key=x+','+y+','+z;if(topShadowCache.has(key))return topShadowCache.get(key);
-    let transmission=1;
-    for(let d=1;d<=10;d++){
-      const block=get(x,y+d,z);
-      if(OPAQUE[block]){transmission*=d/10;break;}
-      if(block===LEAVES)transmission*=0.958;
-    }
-    topShadowCache.set(key,transmission);return transmission;
-  };
-  const ambientShadow=(x,y,z)=>{
-    const exposure=NRM.map(([dx,dy,dz],f)=>{
-      const lateral=f===0||f===1||f===4||f===5,reach=lateral?2:10;let transmission=1;
-      for(let d=1;d<=reach;d++){
-        const block=get(x+dx*d,y+dy*d,z+dz*d);
-        if(OPAQUE[block])return transmission*(lateral?(d===1?0.25:0.65):d/10);
-        if(block===LEAVES)transmission*=0.958;
-      }
-      return transmission;
-    });
-    const enclosure=Math.sqrt(exposure.reduce((sum,v)=>sum+v,0)/exposure.length),closed=exposure.every(v=>v<1);
-    return exposure.map((v,f)=>Math.max(0.025,v*((f===2&&!closed)?1:enclosure)));
-  };
+  computeSky(c);
+  const get=(x,y,z)=>{if(y<0)return STONE;if(y>=CH)return AIR;return blkBuf[(x+SR)+(z+SR)*SW+y*SWW];};
+  const skyAt=(x,y,z)=>{if(y>=CH||y>skyTop)return 15;if(y<0)return 0;return skyBuf[(x+SR)+(z+SR)*SW+y*SWW];};
   const L=computeLight(c);
-  const lightAt=(x,y,z)=>{if(y<0||y>=CH)return 0;const lx=x+LR,lz=z+LR;if(lx<0||lx>=LW||lz<0||lz>=LW)return 0;return L[lx+lz*LW+y*LWW];};
-  const cellLight=(x,y,z)=>OPAQUE[get(x,y,z)]?-1:lightAt(x,y,z);
-  const ao=[0,0,0,0],EPS=0.0004,useAO=AO_ON;
+  const lightAt=(x,y,z)=>{if(!L||y<0||y>=CH)return 0;const lx=x+LR,lz=z+LR;if(lx<0||lx>=LW||lz<0||lz>=LW)return 0;return L[lx+lz*LW+y*LWW];};
+  const ao=[0,0,0,0],vb=[0,0,0,0],EPS=0.0004,useAO=AO_ON,smooth=SOFT_SHADOWS;
   for(let y=0;y<=c.maxY;y++)for(let z=0;z<CS;z++)for(let x=0;x<CS;x++){
     const b=data[x+z*CS+y*SLICE];if(!b)continue;
     const shp=SHAPE[b];
     if(shp){
-      if(shp===1)addCross(M,x,y,z,b,L?lightAt(x,y,z)/15:0);else addTorch(M,x,y,z);
+      if(shp===1)addCross(M,x,y,z,b,lightAt(x,y,z)/15,skyCurve(skyAt(x,y,z)));else addTorch(M,x,y,z);
       continue;
     }
-    const water=b===WATER,op=OPAQUE[b],faceShades=ambientShadow(x,y,z);
+    const water=b===WATER,op=OPAQUE[b],emit=LIGHT[b]>0;
     for(let f=0;f<6;f++){
       const n=NRM[f],nb=get(x+n[0],y+n[1],z+n[2]);
       let vis;
@@ -952,39 +993,36 @@ function buildMesh(c){
       const cx0=x+n[0],cy0=y+n[1],cz0=z+n[2];
       const lower=water&&get(x,y+1,z)!==WATER;
       const base=out.P.length/3;
+      const frontSky=skyAt(cx0,cy0,cz0),frontBl=lightAt(cx0,cy0,cz0);
       for(let k=0;k<4;k++){
-        const a=AA[k],bb=BB[k];
+        const a=AA[k],bb=BB[k],su=a?1:-1,sv=bb?1:-1;
         const px=x+po0+a*u[0]+bb*v[0];let py=y+po1+a*u[1]+bb*v[1];const pz=z+po2+a*u[2]+bb*v[2];
+        // vizinhos do vértice no plano da face: lado U, lado V e canto
+        const x1=cx0+su*u[0],y1=cy0+su*u[1],z1=cz0+su*u[2];
+        const x2=cx0+sv*v[0],y2=cy0+sv*v[1],z2=cz0+sv*v[2];
+        const x3=x1+sv*v[0],y3=y1+sv*v[1],z3=z1+sv*v[2];
+        const o1=OPAQUE[get(x1,y1,z1)]?1:0,o2=OPAQUE[get(x2,y2,z2)]?1:0,o3=OPAQUE[get(x3,y3,z3)]?1:0;
         let sh=FSH[f];
-        if(water){if(lower&&py===y+1)py-=0.12;ao[k]=3;}
-        else if(useAO){
-          const su=a?1:-1,sv=bb?1:-1;
-          const s1=OPAQUE[get(cx0+su*u[0],cy0+su*u[1],cz0+su*u[2])]?1:0;
-          const s2=OPAQUE[get(cx0+sv*v[0],cy0+sv*v[1],cz0+sv*v[2])]?1:0;
-          const cc=OPAQUE[get(cx0+su*u[0]+sv*v[0],cy0+su*u[1]+sv*v[1],cz0+su*u[2]+sv*v[2])]?1:0;
-          const o=(s1&&s2)?0:3-(s1+s2+cc);ao[k]=o;const t=o/3,smooth=t*t*(3-2*t),factor=SOFT_SHADOWS?0.86+0.14*smooth:AOF[o];sh*=factor;
-        }else ao[k]=3;
-        let lg=0;
-        if(L){
-          if(LIGHT[b])lg=1;
-          else{
-            const su=a?1:-1,sv=bb?1:-1;
-            let sum=0,cnt=0,q;
-            q=cellLight(cx0,cy0,cz0);if(q>=0){sum+=q;cnt++;}
-            q=cellLight(cx0+su*u[0],cy0+su*u[1],cz0+su*u[2]);if(q>=0){sum+=q;cnt++;}
-            q=cellLight(cx0+sv*v[0],cy0+sv*v[1],cz0+sv*v[2]);if(q>=0){sum+=q;cnt++;}
-            q=cellLight(cx0+su*u[0]+sv*v[0],cy0+su*u[1]+sv*v[1],cz0+su*u[2]+sv*v[2]);if(q>=0){sum+=q;cnt++;}
-            lg=cnt?sum/cnt/15:0;
-          }
+        if(water){if(lower&&py===y+1)py-=0.12;}
+        else if(useAO){const o=(o1&&o2)?0:3-(o1+o2+o3);sh*=AOF[o];}
+        // luz do céu e de blocos: média dos blocos abertos ao redor do vértice (suave) ou só o bloco da frente
+        let sk=frontSky,bl=frontBl;
+        if(smooth){
+          let ss=frontSky,sb=frontBl,cnt=1;
+          if(!o1){ss+=skyAt(x1,y1,z1);sb+=lightAt(x1,y1,z1);cnt++;}
+          if(!o2){ss+=skyAt(x2,y2,z2);sb+=lightAt(x2,y2,z2);cnt++;}
+          if(!o3&&!(o1&&o2)){ss+=skyAt(x3,y3,z3);sb+=lightAt(x3,y3,z3);cnt++;}
+          sk=ss/cnt;bl=sb/cnt;
         }
+        let lg=bl/15,skf=skyCurve(sk);
+        if(emit){lg=1;skf=1;}
         out.P.push(px,py,pz);
         const uv=uvOf(f,a,bb);
         out.U.push(u0+uv[0]*(u1-u0),v0+uv[1]*(v1-v0));
-        let faceShade=faceShades[f];
-        if(SOFT_SHADOWS&&f===2){const vx=x+bb,vz=z+a;let sum=0;for(let dx=-2;dx<=2;dx++)for(let dz=-2;dz<=2;dz++)sum+=topShadowAt(vx+dx,y,vz+dz);const blur=sum/25,center=topShadowAt(x,y,z);faceShade=Math.min(1,faceShade+Math.max(0,blur-center)*0.8);}
-        out.C.push(sh,lg,faceShade);
+        out.C.push(sh,lg,skf);
+        vb[k]=sh*Math.max(skf*0.9,lg);
       }
-      if(ao[0]+ao[2]>=ao[1]+ao[3])out.I.push(base,base+1,base+2,base,base+2,base+3);
+      if(vb[0]+vb[2]>=vb[1]+vb[3])out.I.push(base,base+1,base+2,base,base+2,base+3);
       else out.I.push(base+1,base+2,base+3,base+1,base+3,base);
     }
   }
@@ -1201,15 +1239,23 @@ const MATS=[{n:'de madeira',c:[170,128,76]},{n:'de pedra',c:[138,138,142]},{n:'d
 const TOOLN=['Picareta','Machado','Pá','Espada'];
 function toolSprite(t,m){
   const hi=shadeC(m,1.22),lo=shadeC(m,0.74);
-  return makeSprite(set=>{
+  const original=makeSprite(set=>{
     if(t===0){
       line(set,1,14,9,6,HANDLE,HANDLE_D);
       const C=[2,13],R=10;
       for(let y=0;y<16;y++)for(let x=0;x<16;x++){const dx=x-C[0],dy=y-C[1];if(dx<0||dy>0)continue;const d=Math.hypot(dx,dy);if(d>=R-1.3&&d<=R+0.7)set(x,y,d>R-0.1?hi:(d<R-0.8?lo:m));}
     }else if(t===1){
-      line(set,1,14,12,3,HANDLE,HANDLE_D);
-      const rows={2:[7,8,9,10],3:[6,7,8,9,10,11],4:[6,7,8,9,10],5:[7,8,9]};
-      for(const y in rows)for(const x of rows[y])set(x,+y,x<=7?hi:(x>=10?lo:m));
+      // Machado: cabeça assimétrica (lâmina larga de um lado, nuca curta do outro) presa à ponta do cabo
+      line(set,1,15,9,7,HANDLE,HANDLE_D);
+      const H=[10,6];
+      for(let y=0;y<16;y++)for(let x=0;x<16;x++){
+        const dx=x-H[0],dy=y-H[1],s=(dx-dy)*0.7071,w=(-dx-dy)*0.7071;
+        const half=1.55+0.3*Math.max(0,w-1)-(w>5?(w-5)*0.55:0);
+        if(w>=-1.4&&w<=6.4&&Math.abs(s-0.3)<=half){
+          set(x,y,w>=4.6?hi:(s<-0.6?lo:m));
+        }
+      }
+      set(8,7,HANDLE_D);set(9,6,HANDLE);
     }else if(t===2){
       line(set,1,14,10,5,HANDLE,HANDLE_D);
       for(let y=0;y<16;y++)for(let x=0;x<16;x++){const a=((x-12)-(y-3))*0.7071,b=((x-12)+(y-3))*0.7071;if((a/3.4)**2+(b/2.3)**2<=1)set(x,y,b<-0.8?hi:(b>0.8?lo:m));}
@@ -1220,6 +1266,7 @@ function toolSprite(t,m){
       line(set,3,11,0,14,HANDLE,HANDLE_D);
     }
   });
+  const mirrored=newCan(),ctx=mirrored.getContext('2d');ctx.translate(16,0);ctx.scale(-1,1);ctx.drawImage(original,0,0);return mirrored;
 }
 const ITEM_CAN={};
 const STICK=100,COAL=101,IRON_I=102,GOLD_I=103,DIAMOND=104,APPLE=105,TOOL0=110;
@@ -1284,7 +1331,7 @@ function lightMat(m){
   m.onBeforeCompile=sh=>{
     sh.uniforms.uDay=uDay;
     sh.fragmentShader='uniform float uDay;\n'+sh.fragmentShader.replace('#include <color_fragment>',
-      'float lgt=clamp(vColor.g,0.0,0.72);float dayLight=clamp(uDay,0.0,1.0);float ambient=clamp(vColor.b,0.025,1.0);float dl=min(1.0,max(dayLight*ambient,lgt));vec3 tint=mix(vec3(1.0),vec3(1.0,0.86,0.66),clamp((lgt-dayLight*0.55)*1.4,0.0,1.0));diffuseColor.rgb*=vColor.r*dl*tint;');
+      'float lgt=clamp(vColor.g,0.0,0.85);float dayLight=clamp(uDay,0.0,1.0);float sk=clamp(vColor.b,0.0,1.0)*dayLight;float dl=clamp(max(max(sk,lgt),0.045),0.0,1.0);vec3 tint=mix(vec3(1.0),vec3(1.0,0.86,0.66),clamp((lgt-sk*0.55)*1.4,0.0,1.0));diffuseColor.rgb*=vColor.r*dl*tint;');
   };
   return m;
 }
@@ -1360,7 +1407,7 @@ function setHandItem(id){
   while(handHold.children.length)handHold.remove(handHold.children[0]);
   const m=makeHeld(id);if(!m)return;
   if(isCubeId(id)){m.scale.setScalar(0.3);m.position.set(0,0.1,-0.06);m.rotation.set(0.1,0.78,0);}
-  else{m.scale.setScalar(0.62);m.position.set(0.02,0.16,-0.08);m.rotation.set(0.15,-0.45,0);}
+  else{m.scale.setScalar(0.38);m.position.set(0.02,0.12,-0.18);m.rotation.set(0.15,-0.45,-0.18);}
   handHold.add(m);
 }
 function updateHand(dt){
@@ -2312,39 +2359,5 @@ setInterval(()=>{if(mode==='play')saveWorld();},15000);
 document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseInputs();saveWorld();}});
 window.addEventListener('pagehide',saveWorld);
 </script>
-
-</body></html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+</body>
+</html>
